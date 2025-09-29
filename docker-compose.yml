@@ -1,0 +1,88 @@
+version: "3.9"
+
+services:
+  product_db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: products
+    ports:
+      - "5432:5432"
+
+  order_db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: orders
+    ports:
+      - "5433:5432"
+
+  customer_db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: customers
+    ports:
+      - "5434:5432"
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  product_service:
+    build: ./backend/product_service
+    depends_on:
+      - product_db
+      - rabbitmq
+    environment:
+      POSTGRES_HOST: product_db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: products
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASS: guest
+    ports:
+      - "8000:8000"
+
+  customer_service:
+    build: ./backend/customer_service
+    depends_on:
+      - customer_db
+    environment:
+      POSTGRES_HOST: customer_db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: customers
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      # PRODUCT_SERVICE_URL is only used if your customer service ever calls product
+      PRODUCT_SERVICE_URL: http://product_service:8000
+    ports:
+      - "8002:8002"
+
+  order_service:
+    build: ./backend/order_service
+    depends_on:
+      - order_db
+      - customer_service
+      - rabbitmq
+    environment:
+      POSTGRES_HOST: order_db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: orders
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      CUSTOMER_SERVICE_URL: http://customer_service:8002
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASS: guest
+    ports:
+      - "8001:8001"
