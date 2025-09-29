@@ -1,32 +1,34 @@
-name: Backend CI - Test, Build and Push Images to ACR
+name: Backend CI (testing) — Test, Lint, Build & Push to ACR
 
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ testing ]
     paths:
       - 'backend/**'
-      - '.github/workflows/backend_ci.yml'
+      - '.github/workflows/backend_ci_testing.yml'
 
 env:
   ACR_LOGIN_SERVER: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
   IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}
 
 jobs:
-  test_and_lint_backends:
+  test_and_lint_all:
     runs-on: ubuntu-latest
 
     services:
-      product_db:
+      customer_db:
         image: postgres:15
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: products
+          POSTGRES_DB: customers
         ports: [ "5432:5432" ]
         options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s --health-timeout 5s --health-retries 5
+          --health-cmd "pg_isready -U postgres -d customers"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
 
       order_db:
         image: postgres:15
@@ -36,19 +38,24 @@ jobs:
           POSTGRES_DB: orders
         ports: [ "5433:5432" ]
         options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s --health-timeout 5s --health-retries 5
+          --health-cmd "pg_isready -U postgres -d orders"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
 
-      customer_db:
+      # Product DB (5434)
+      product_db:
         image: postgres:15
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: customers
+          POSTGRES_DB: products
         ports: [ "5434:5432" ]
         options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s --health-timeout 5s --health-retries 5
+          --health-cmd "pg_isready -U postgres -d products"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
 
     steps:
       - name: Checkout repository
@@ -59,25 +66,36 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install dependencies
+      - name: Install shared CI tools
         run: |
           pip install --upgrade pip
-          for req in backend/*/requirements.txt; do
-            echo "Installing $req"; pip install -r "$req";
-          done
           pip install pytest httpx flake8
 
-      - name: Run product_service tests
-        working-directory: backend/product_service
+      # ---------- customer_service ----------
+      - name: Install customer_service deps
+        if: ${{ always() }}
+        working-directory: backend/customer_service
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Test customer_service
+        working-directory: backend/customer_service
         env:
           POSTGRES_HOST: localhost
           POSTGRES_PORT: 5432
-          POSTGRES_DB: products
+          POSTGRES_DB: customers
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-        run: pytest tests --maxfail=1 --disable-warnings -q
+          DATABASE_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/customers
+        run: pytest -q
 
-      - name: Run order_service tests
+      # ---------- order_service ----------
+      - name: Install order_service deps
+        working-directory: backend/order_service
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Test order_service
         working-directory: backend/order_service
         env:
           POSTGRES_HOST: localhost
@@ -85,21 +103,34 @@ jobs:
           POSTGRES_DB: orders
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-        run: pytest tests --maxfail=1 --disable-warnings -q
+          DATABASE_URL: postgresql+psycopg2://postgres:postgres@localhost:5433/orders
+        run: pytest -q
 
-      - name: Run customer_service tests
-        working-directory: backend/customer_service
+      # ---------- product_service ----------
+      - name: Install product_service deps
+        working-directory: backend/product_service
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Test product_service
+        working-directory: backend/product_service
         env:
-          # IMPORTANT: point to the dedicated service on port 5434
-          DATABASE_URL: postgresql+psycopg2://postgres:postgres@localhost:5434/customers
-        run: pytest tests --maxfail=1 --disable-warnings -q
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5434
+          POSTGRES_DB: products
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          DATABASE_URL: postgresql+psycopg2://postgres:postgres@localhost:5434/products
+        run: pytest -q
 
-      - name: Run flake8 linting
+      # Lint everything (keep it after installs so flake8 is available)
+      - name: Run flake8
         run: flake8 backend/
 
   build_and_push_images:
     runs-on: ubuntu-latest
-    needs: test_and_lint_backends
+    needs: test_and_lint_all   # <- only runs when tests & lint pass
+    if: github.ref == 'refs/heads/testing'   # push images only from 'testing' branch
 
     steps:
       - name: Checkout repository
@@ -110,30 +141,33 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Login to Azure Container Registry
+      - name: Login to ACR
         run: az acr login --name ${{ env.ACR_LOGIN_SERVER }}
 
-      - name: Build & Push Product Service
-        run: |
-          docker build -t ${{ env.ACR_LOGIN_SERVER }}/product_service:${{ env.IMAGE_TAG }} ./backend/product_service/
-          docker push ${{ env.ACR_LOGIN_SERVER }}/product_service:${{ env.IMAGE_TAG }}
-          docker tag ${{ env.ACR_LOGIN_SERVER }}/product_service:${{ env.IMAGE_TAG }} ${{ env.ACR_LOGIN_SERVER }}/product_service:latest
-          docker push ${{ env.ACR_LOGIN_SERVER }}/product_service:latest
-
-      - name: Build & Push Order Service
-        run: |
-          docker build -t ${{ env.ACR_LOGIN_SERVER }}/order_service:${{ env.IMAGE_TAG }} ./backend/order_service/
-          docker push ${{ env.ACR_LOGIN_SERVER }}/order_service:${{ env.IMAGE_TAG }}
-          docker tag ${{ env.ACR_LOGIN_SERVER }}/order_service:${{ env.IMAGE_TAG }} ${{ env.ACR_LOGIN_SERVER }}/order_service:latest
-          docker push ${{ env.ACR_LOGIN_SERVER }}/order_service:latest
-
-      - name: Build & Push Customer Service
+      # Build & push customer_service
+      - name: Build & push customer_service
         run: |
           docker build -t ${{ env.ACR_LOGIN_SERVER }}/customer_service:${{ env.IMAGE_TAG }} ./backend/customer_service/
           docker push ${{ env.ACR_LOGIN_SERVER }}/customer_service:${{ env.IMAGE_TAG }}
-          docker tag ${{ env.ACR_LOGIN_SERVER }}/customer_service:${{ env.IMAGE_TAG }} ${{ env.ACR_LOGIN_SERVER }}/customer_service:latest
+          docker tag  ${{ env.ACR_LOGIN_SERVER }}/customer_service:${{ env.IMAGE_TAG }} ${{ env.ACR_LOGIN_SERVER }}/customer_service:latest
           docker push ${{ env.ACR_LOGIN_SERVER }}/customer_service:latest
 
-      - name: Logout from Azure
+      # Build & push order_service
+      - name: Build & push order_service
+        run: |
+          docker build -t ${{ env.ACR_LOGIN_SERVER }}/order_service:${{ env.IMAGE_TAG }} ./backend/order_service/
+          docker push ${{ env.ACR_LOGIN_SERVER }}/order_service:${{ env.IMAGE_TAG }}
+          docker tag  ${{ env.ACR_LOGIN_SERVER }}/order_service:${{ env.IMAGE_TAG }} ${{ env.ACR_LOGIN_SERVER }}/order_service:latest
+          docker push ${{ env.ACR_LOGIN_SERVER }}/order_service:latest
+
+      # Build & push product_service
+      - name: Build & push product_service
+        run: |
+          docker build -t ${{ env.ACR_LOGIN_SERVER }}/product_service:${{ env.IMAGE_TAG }} ./backend/product_service/
+          docker push ${{ env.ACR_LOGIN_SERVER }}/product_service:${{ env.IMAGE_TAG }}
+          docker tag  ${{ env.ACR_LOGIN_SERVER }}/product_service:${{ env.IMAGE_TAG }} ${{ env.ACR_LOGIN_SERVER }}/product_service:latest
+          docker push ${{ env.ACR_LOGIN_SERVER }}/product_service:latest
+
+      - name: Logout Azure
         if: always()
         run: az logout
