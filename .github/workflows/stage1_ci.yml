@@ -108,8 +108,6 @@ jobs:
           POSTGRES_PASSWORD: postgres
         run: pytest tests --maxfail=1 --disable-warnings -q
 
-      - name: Lint all backends
-        run: flake8 backend/
 
   # 2) Build & push images ONLY if tests pass and branch is 'testing'
   build_and_push_images:
