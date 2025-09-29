@@ -1,9 +1,8 @@
-name: Backend CI - Test, Build and Push to ACR
+name: Backend CI — test, build, push
 
 on:
   push:
-    branches:
-      - testing
+    branches: [testing]
 
 env:
   ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
@@ -13,35 +12,87 @@ jobs:
   test-build-push:
     runs-on: ubuntu-latest
 
-    steps:
-      # Checkout repo
-      - name: Checkout
-        uses: actions/checkout@v3
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
 
-      # Setup Python for running backend tests
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      # Install deps and run tests for each backend service
-      - name: Run backend tests
+      - name: System deps for psycopg2 + psql client
         run: |
-          cd backend/customer_service && pip install -r requirements-dev.txt && pytest || exit 1
-          cd ../product_service && pip install -r requirements-dev.txt && pytest || exit 1
-          cd ../order_service && pip install -r requirements-dev.txt && pytest || exit 1
+          sudo apt-get update
+          sudo apt-get install -y libpq-dev postgresql-client
 
-      # Azure login (using service principal JSON in secret)
+      - name: Wait for Postgres and create test databases
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # wait until Postgres is ready
+          for i in {1..30}; do
+            if pg_isready -h 127.0.0.1 -p 5432 -U postgres; then
+              echo "Postgres is ready"; break
+            fi
+            echo "Waiting for Postgres ($i/30)..."; sleep 2
+          done
+          # create one DB per service (adjust names if your code expects different)
+          psql -h 127.0.0.1 -U postgres -c "CREATE DATABASE customers_test;"
+          psql -h 127.0.0.1 -U postgres -c "CREATE DATABASE products_test;"
+          psql -h 127.0.0.1 -U postgres -c "CREATE DATABASE orders_test;"
+
+      # --- Run tests (point each service at the CI Postgres) ---
+      - name: Test customer_service
+        working-directory: backend/customer_service
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/customers_test
+        run: |
+          pip install -r requirements-dev.txt
+          pytest -q
+
+      - name: Test product_service
+        working-directory: backend/product_service
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/products_test
+        run: |
+          pip install -r requirements-dev.txt
+          pytest -q
+
+      - name: Test order_service
+        working-directory: backend/order_service
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/orders_test
+        run: |
+          pip install -r requirements-dev.txt
+          pytest -q
+
+      # --- Login to Azure and push images only if tests passed ---
       - name: Azure Login
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # Build and push Docker images
-      - name: Build and push images
-        run: |
-          az acr login --name $ACR_LOGIN_SERVER
+      - name: ACR login
+        run: az acr login --name $ACR_LOGIN_SERVER
 
+      - name: Build & push Docker images
+        run: |
           docker build -t $ACR_LOGIN_SERVER/customer_service:${IMAGE_TAG} ./backend/customer_service
           docker push $ACR_LOGIN_SERVER/customer_service:${IMAGE_TAG}
 
