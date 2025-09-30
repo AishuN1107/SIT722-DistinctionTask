@@ -1,0 +1,94 @@
+name: Stage 2 — Staging: create, smoke-test, destroy
+
+on:
+  workflow_run:
+    workflows: ["Stage 1 CI — Test, Build & Push to ACR (testing branch)"]
+    types: [completed]
+
+env:
+  ACR_LOGIN_SERVER: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+  AZURE_LOCATION:   ${{ secrets.AZURE_LOCATION }}
+  AZURE_RG_STAGING: ${{ secrets.AZURE_RG_STAGING }}
+
+jobs:
+  staging_deploy:
+    if: >
+      ${{
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'testing'
+      }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Get ACR name & creds
+        id: acr
+        shell: bash
+        run: |
+          ACR_NAME="${ACR_LOGIN_SERVER%%.*}"
+          echo "acr_name=$ACR_NAME" >> $GITHUB_OUTPUT
+          ACR_USER=$(az acr credential show -n "$ACR_NAME" --query "username" -o tsv)
+          ACR_PASS=$(az acr credential show -n "$ACR_NAME" --query "passwords[0].value" -o tsv)
+          echo "acr_user=$ACR_USER" >> $GITHUB_OUTPUT
+          echo "::add-mask::$ACR_PASS"
+          echo "acr_pass=$ACR_PASS" >> $GITHUB_OUTPUT
+
+      - name: Prepare ACI template
+        id: tmpl
+        shell: bash
+        run: |
+          RUN_ID="${{ github.run_id }}"
+          export RUN_ID
+          export AZURE_LOCATION="${AZURE_LOCATION}"
+          export ACR_LOGIN_SERVER="${ACR_LOGIN_SERVER}"
+          envsubst < infra/staging-aci.yml > /tmp/staging-aci.rendered.yml
+          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+          echo "dns=sit722-staging-${RUN_ID}.${AZURE_LOCATION}.azurecontainer.io" >> $GITHUB_OUTPUT
+          echo "Rendered ACI YAML:"
+          sed -n '1,60p' /tmp/staging-aci.rendered.yml
+
+      - name: Create staging container group
+        shell: bash
+        run: |
+          az container create \
+            --resource-group "$AZURE_RG_STAGING" \
+            --file /tmp/staging-aci.rendered.yml \
+            --registry-login-server "${{ env.ACR_LOGIN_SERVER }}" \
+            --registry-username "${{ steps.acr.outputs.acr_user }}" \
+            --registry-password "${{ steps.acr.outputs.acr_pass }}"
+
+      - name: Wait for containers to be running (max ~5m)
+        shell: bash
+        run: |
+          set -e
+          CG="sit722-staging-${{ steps.tmpl.outputs.run_id }}"
+          for i in {1..60}; do
+            STATE=$(az container show -g "$AZURE_RG_STAGING" -n "$CG" --query "instanceView.state" -o tsv || true)
+            echo "State: $STATE"
+            [ "$STATE" = "Running" ] && break
+            sleep 5
+          done
+
+      - name: Smoke test /health endpoints
+        shell: bash
+        run: |
+          DNS="${{ steps.tmpl.outputs.dns }}"
+          echo "Hitting $DNS"
+          curl -fsS "http://${DNS}:8000/health"
+          curl -fsS "http://${DNS}:8001/health"
+          curl -fsS "http://${DNS}:8002/health"
+
+      - name: Destroy staging environment (always)
+        if: always()
+        shell: bash
+        run: |
+          az container delete \
+            --resource-group "$AZURE_RG_STAGING" \
+            --name "sit722-staging-${{ steps.tmpl.outputs.run_id }}" \
+            --yes
