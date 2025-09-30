@@ -86,3 +86,4 @@ properties:
         port: 8002
 restartPolicy: Never
 type: Microsoft.ContainerInstance/containerGroups
+
