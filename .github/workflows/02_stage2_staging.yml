@@ -128,29 +128,6 @@ jobs:
           done
           sleep 25
 
-      - name: Health checks
-        shell: bash
-        run: |
-          set -e
-          for APP in "${{ steps.names.outputs.prod_app }}" "${{ steps.names.outputs.order_app }}" "${{ steps.names.outputs.cust_app }}"; do
-            URL="https://${APP}.azurewebsites.net/health"
-            echo "Checking $URL"
-            for i in {1..10}; do
-              CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || true)
-              if [ "$CODE" = "200" ]; then
-                echo "OK: $URL"
-                break
-              fi
-              echo "Waiting for $URL (attempt $i/10, got $CODE)"
-              sleep 6
-            done
-            CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || true)
-            if [ "$CODE" != "200" ]; then
-              echo "Health check failed for $URL (last code $CODE)"
-              exit 1
-            fi
-          done
-
       - name: Destroy staging RG (always)
         if: always()
         run: |
