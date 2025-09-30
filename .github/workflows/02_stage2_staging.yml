@@ -1,4 +1,4 @@
-name: Stage 2 — Staging: create, smoke-test, destroy
+name: Stage 2 – Provision Staging, Deploy & Destroy
 
 on:
   workflow_run:
@@ -7,88 +7,174 @@ on:
 
 env:
   ACR_LOGIN_SERVER: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
-  AZURE_LOCATION:   ${{ secrets.AZURE_LOCATION }}
-  AZURE_RG_STAGING: ${{ secrets.AZURE_RG_STAGING }}
 
 jobs:
-  staging_deploy:
+  deploy_staging:
+    name: Create staging & deploy images
+    runs-on: ubuntu-latest
+    # Only proceed if Stage 1 succeeded AND was on branch "testing"
     if: >
       ${{
         github.event.workflow_run.conclusion == 'success' &&
         github.event.workflow_run.head_branch == 'testing'
       }}
-    runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout (for scripts if any)
+        uses: actions/checkout@v4
 
       - name: Azure Login
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Get ACR name & creds
+      - name: Derive names (RG/Plan/WebApps)
+        id: names
+        shell: bash
+        run: |
+          # Unique suffix for this staging run
+          SUFFIX="${{ github.run_id }}"
+          echo "suffix=$SUFFIX" >> $GITHUB_OUTPUT
+
+          # Resource Group & Plan
+          echo "rg=week10-staging-$SUFFIX" >> $GITHUB_OUTPUT
+          echo "plan=sit722-staging-plan-$SUFFIX" >> $GITHUB_OUTPUT
+
+          # Web app names (Linux)
+          echo "app_product=sit722-stg-product-$SUFFIX"   >> $GITHUB_OUTPUT
+          echo "app_order=sit722-stg-order-$SUFFIX"       >> $GITHUB_OUTPUT
+          echo "app_customer=sit722-stg-customer-$SUFFIX" >> $GITHUB_OUTPUT
+
+          # ACR short name (e.g. aishuweek10acr)
+          ACR_NAME="${ACR_LOGIN_SERVER%%.*}"
+          echo "acr_name=$ACR_NAME" >> $GITHUB_OUTPUT
+
+      - name: Get ACR credentials
         id: acr
         shell: bash
         run: |
-          ACR_NAME="${ACR_LOGIN_SERVER%%.*}"
-          echo "acr_name=$ACR_NAME" >> $GITHUB_OUTPUT
-          ACR_USER=$(az acr credential show -n "$ACR_NAME" --query "username" -o tsv)
-          ACR_PASS=$(az acr credential show -n "$ACR_NAME" --query "passwords[0].value" -o tsv)
-          echo "acr_user=$ACR_USER" >> $GITHUB_OUTPUT
-          echo "::add-mask::$ACR_PASS"
-          echo "acr_pass=$ACR_PASS" >> $GITHUB_OUTPUT
+          USER=$(az acr credential show -n "${{ steps.names.outputs.acr_name }}" --query username -o tsv)
+          PASS=$(az acr credential show -n "${{ steps.names.outputs.acr_name }}" --query passwords[0].value -o tsv)
+          echo "user=$USER" >> $GITHUB_OUTPUT
+          echo "pass=$PASS" >> $GITHUB_OUTPUT
 
-      - name: Prepare ACI template
-        id: tmpl
+      - name: Create staging RG & App Service plan
         shell: bash
         run: |
-          RUN_ID="${{ github.run_id }}"
-          export RUN_ID
-          export AZURE_LOCATION="${AZURE_LOCATION}"
-          export ACR_LOGIN_SERVER="${ACR_LOGIN_SERVER}"
-          envsubst < infra/staging-aci.yml > /tmp/staging-aci.rendered.yml
-          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
-          echo "dns=sit722-staging-${RUN_ID}.${AZURE_LOCATION}.azurecontainer.io" >> $GITHUB_OUTPUT
-          echo "Rendered ACI YAML:"
-          sed -n '1,60p' /tmp/staging-aci.rendered.yml
+          az group create -n "${{ steps.names.outputs.rg }}" -l eastasia
+          az appservice plan create \
+            -g "${{ steps.names.outputs.rg }}" \
+            -n "${{ steps.names.outputs.plan }}" \
+            --is-linux --sku B1
 
-      - name: Create staging container group
+      - name: Create 3 Linux Web Apps (staging)
         shell: bash
         run: |
-          az container create \
-            --resource-group "$AZURE_RG_STAGING" \
-            --file /tmp/staging-aci.rendered.yml \
-            --registry-login-server "${{ env.ACR_LOGIN_SERVER }}" \
-            --registry-username "${{ steps.acr.outputs.acr_user }}" \
-            --registry-password "${{ steps.acr.outputs.acr_pass }}"
+          az webapp create -g "${{ steps.names.outputs.rg }}" -p "${{ steps.names.outputs.plan }}" -n "${{ steps.names.outputs.app_product }}"  --runtime "PYTHON:3.10"
+          az webapp create -g "${{ steps.names.outputs.rg }}" -p "${{ steps.names.outputs.plan }}" -n "${{ steps.names.outputs.app_order }}"    --runtime "PYTHON:3.10"
+          az webapp create -g "${{ steps.names.outputs.rg }}" -p "${{ steps.names.outputs.plan }}" -n "${{ steps.names.outputs.app_customer }}" --runtime "PYTHON:3.10"
 
-      - name: Wait for containers to be running (max ~5m)
+      - name: Configure containers from ACR (:latest)
+        shell: bash
+        env:
+          ACR_LOGIN_SERVER: ${{ env.ACR_LOGIN_SERVER }}
+          ACR_USER: ${{ steps.acr.outputs.user }}
+          ACR_PASS: ${{ steps.acr.outputs.pass }}
+        run: |
+          # Product service
+          az webapp config container set -g "${{ steps.names.outputs.rg }}" -n "${{ steps.names.outputs.app_product }}" \
+            --docker-custom-image-name "$ACR_LOGIN_SERVER/product_service:latest" \
+            --docker-registry-server-url "https://$ACR_LOGIN_SERVER" \
+            --docker-registry-server-user "$ACR_USER" \
+            --docker-registry-server-password "$ACR_PASS"
+          az webapp config appsettings set -g "${{ steps.names.outputs.rg }}" -n "${{ steps.names.outputs.app_product }}" \
+            --settings WEBSITES_PORT=8000
+
+          # Customer service
+          az webapp config container set -g "${{ steps.names.outputs.rg }}" -n "${{ steps.names.outputs.app_customer }}" \
+            --docker-custom-image-name "$ACR_LOGIN_SERVER/customer_service:latest" \
+            --docker-registry-server-url "https://$ACR_LOGIN_SERVER" \
+            --docker-registry-server-user "$ACR_USER" \
+            --docker-registry-server-password "$ACR_PASS"
+          az webapp config appsettings set -g "${{ steps.names.outputs.rg }}" -n "${{ steps.names.outputs.app_customer }}" \
+            --settings WEBSITES_PORT=8002
+
+          # Order service
+          az webapp config container set -g "${{ steps.names.outputs.rg }}" -n "${{ steps.names.outputs.app_order }}" \
+            --docker-custom-image-name "$ACR_LOGIN_SERVER/order_service:latest" \
+            --docker-registry-server-url "https://$ACR_LOGIN_SERVER" \
+            --docker-registry-server-user "$ACR_USER" \
+            --docker-registry-server-password "$ACR_PASS"
+          az webapp config appsettings set -g "${{ steps.names.outputs.rg }}" -n "${{ steps.names.outputs.app_order }}" \
+            --settings WEBSITES_PORT=8001
+
+      - name: Wire internal URLs between services (customer ↔ product, order ↔ customer)
+        id: hosts
+        shell: bash
+        run: |
+          PROD_HOST=$(az webapp show -g "${{ steps.names.outputs.rg }}" -n "${{ steps.names.outputs.app_product }}"  --query defaultHostName -o tsv)
+          CUST_HOST=$(az webapp show -g "${{ steps.names.outputs.rg }}" -n "${{ steps.names.outputs.app_customer }}" --query defaultHostName -o tsv)
+
+          az webapp config appsettings set -g "${{ steps.names.outputs.rg }}" -n "${{ steps.names.outputs.app_customer }}" \
+            --settings PRODUCT_SERVICE_URL="https://$PROD_HOST"
+
+          az webapp config appsettings set -g "${{ steps.names.outputs.rg }}" -n "${{ steps.names.outputs.app_order }}" \
+            --settings CUSTOMER_SERVICE_URL="https://$CUST_HOST"
+
+          echo "prod_host=$PROD_HOST" >> $GITHUB_OUTPUT
+          echo "cust_host=$CUST_HOST" >> $GITHUB_OUTPUT
+
+      - name: Health checks (with retry)
         shell: bash
         run: |
           set -e
-          CG="sit722-staging-${{ steps.tmpl.outputs.run_id }}"
-          for i in {1..60}; do
-            STATE=$(az container show -g "$AZURE_RG_STAGING" -n "$CG" --query "instanceView.state" -o tsv || true)
-            echo "State: $STATE"
-            [ "$STATE" = "Running" ] && break
-            sleep 5
+          prod_url="https://${{ steps.hosts.outputs.prod_host }}/health"
+          cust_url="https://${{ steps.hosts.outputs.cust_host }}/health"
+          order_url="https://$(az webapp show -g "${{ steps.names.outputs.rg }}" -n "${{ steps.names.outputs.app_order }}" --query defaultHostName -o tsv)/health"
+
+          for url in "$prod_url" "$cust_url" "$order_url"; do
+            echo "Checking $url ..."
+            for i in {1..20}; do
+              code=$(curl -s -o /dev/null -w "%{http_code}" "$url" || true)
+              if [ "$code" = "200" ]; then
+                echo "OK $url"
+                break
+              fi
+              echo "Waiting ($i/20) ..."
+              sleep 10
+              if [ "$i" -eq 20 ]; then
+                echo "Health check FAILED for $url"
+                exit 1
+              fi
+            done
           done
 
-      - name: Smoke test /health endpoints
-        shell: bash
-        run: |
-          DNS="${{ steps.tmpl.outputs.dns }}"
-          echo "Hitting $DNS"
-          curl -fsS "http://${DNS}:8000/health"
-          curl -fsS "http://${DNS}:8001/health"
-          curl -fsS "http://${DNS}:8002/health"
+  destroy_staging:
+    name: Destroy staging environment (needs approval)
+    runs-on: ubuntu-latest
+    needs: deploy_staging
+    # Gate this job behind the 'staging' environment so you can approve/reject
+    environment: staging
+    if: always()
 
-      - name: Destroy staging environment (always)
-        if: always()
+    steps:
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Remove staging resource group
         shell: bash
         run: |
-          az container delete \
-            --resource-group "$AZURE_RG_STAGING" \
-            --name "sit722-staging-${{ steps.tmpl.outputs.run_id }}" \
-            --yes
+          # RG name must match the one created in deploy job
+          RG="week10-staging-${{ needs.deploy_staging.outputs.suffix }}"
+          # Fallback: discover any staging RG created in this run if output isn't available
+          if [ -z "$RG" ]; then
+            RG=$(az group list --query "[?starts_with(name, 'week10-staging-${{ github.run_id }}')].name | [0]" -o tsv)
+          fi
+          if [ -n "$RG" ]; then
+            echo "Deleting $RG ..."
+            az group delete -n "$RG" --yes --no-wait
+          else
+            echo "No staging RG found to delete."
+          fi
