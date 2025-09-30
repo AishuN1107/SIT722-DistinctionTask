@@ -1,0 +1,68 @@
+name: Stage 3 — Deploy to Production (main)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+env:
+  ACR_LOGIN_SERVER:       ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+  AZURE_RG_PROD:          ${{ secrets.AZURE_RG_PROD }}
+  PROD_WEBAPP_PRODUCT:    ${{ secrets.AZURE_PROD_WEBAPP_PRODUCT }}
+  PROD_WEBAPP_ORDER:      ${{ secrets.AZURE_PROD_WEBAPP_ORDER }}
+  PROD_WEBAPP_CUSTOMER:   ${{ secrets.AZURE_PROD_WEBAPP_CUSTOMER }}
+
+jobs:
+  deploy_prod:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Get ACR credentials
+        id: acr
+        shell: bash
+        run: |
+          ACR_NAME="${ACR_LOGIN_SERVER%%.*}"
+          ACR_USER=$(az acr credential show -n "$ACR_NAME" --query "username" -o tsv)
+          ACR_PASS=$(az acr credential show -n "$ACR_NAME" --query "passwords[0].value" -o tsv)
+          echo "acr_user=$ACR_USER" >> $GITHUB_OUTPUT
+          echo "::add-mask::$ACR_PASS"
+          echo "acr_pass=$ACR_PASS" >> $GITHUB_OUTPUT
+
+      - name: Deploy Product (latest)
+        run: |
+          az webapp config container set \
+            --resource-group "$AZURE_RG_PROD" \
+            --name "$PROD_WEBAPP_PRODUCT" \
+            --docker-custom-image-name "${{ env.ACR_LOGIN_SERVER }}/product_service:latest" \
+            --docker-registry-server-url "https://${{ env.ACR_LOGIN_SERVER }}" \
+            --docker-registry-server-user "${{ steps.acr.outputs.acr_user }}" \
+            --docker-registry-server-password "${{ steps.acr.outputs.acr_pass }}"
+          az webapp restart -g "$AZURE_RG_PROD" -n "$PROD_WEBAPP_PRODUCT"
+
+      - name: Deploy Order (latest)
+        run: |
+          az webapp config container set \
+            --resource-group "$AZURE_RG_PROD" \
+            --name "$PROD_WEBAPP_ORDER" \
+            --docker-custom-image-name "${{ env.ACR_LOGIN_SERVER }}/order_service:latest" \
+            --docker-registry-server-url "https://${{ env.ACR_LOGIN_SERVER }}" \
+            --docker-registry-server-user "${{ steps.acr.outputs.acr_user }}" \
+            --docker-registry-server-password "${{ steps.acr.outputs.acr_pass }}"
+          az webapp restart -g "$AZURE_RG_PROD" -n "$PROD_WEBAPP_ORDER"
+
+      - name: Deploy Customer (latest)
+        run: |
+          az webapp config container set \
+            --resource-group "$AZURE_RG_PROD" \
+            --name "$PROD_WEBAPP_CUSTOMER" \
+            --docker-custom-image-name "${{ env.ACR_LOGIN_SERVER }}/customer_service:latest" \
+            --docker-registry-server-url "https://${{ env.ACR_LOGIN_SERVER }}" \
+            --docker-registry-server-user "${{ steps.acr.outputs.acr_user }}" \
+            --docker-registry-server-password "${{ steps.acr.outputs.acr_pass }}"
+          az webapp restart -g "$AZURE_RG_PROD" -n "$PROD_WEBAPP_CUSTOMER"

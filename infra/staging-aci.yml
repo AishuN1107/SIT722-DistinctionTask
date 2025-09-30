@@ -1,0 +1,88 @@
+# infra/staging-aci.yml
+apiVersion: 2019-12-01
+location: ${AZURE_LOCATION}
+name: sit722-staging-${RUN_ID}
+properties:
+  containers:
+    # --- Databases (sidecars) ---
+    - name: pg-products
+      properties:
+        image: postgres:15
+        resources: { requests: { cpu: 0.5, memoryInGb: 0.8 } }
+        environmentVariables:
+          - name: POSTGRES_USER     ; value: postgres
+          - name: POSTGRES_PASSWORD ; value: postgres
+          - name: POSTGRES_DB       ; value: products
+        ports: [ { port: 5432 } ]
+
+    - name: pg-orders
+      properties:
+        image: postgres:15
+        resources: { requests: { cpu: 0.5, memoryInGb: 0.8 } }
+        environmentVariables:
+          - name: POSTGRES_USER     ; value: postgres
+          - name: POSTGRES_PASSWORD ; value: postgres
+          - name: POSTGRES_DB       ; value: orders
+        ports: [ { port: 5432 } ]
+
+    - name: pg-customers
+      properties:
+        image: postgres:15
+        resources: { requests: { cpu: 0.5, memoryInGb: 0.8 } }
+        environmentVariables:
+          - name: POSTGRES_USER     ; value: postgres
+          - name: POSTGRES_PASSWORD ; value: postgres
+          - name: POSTGRES_DB       ; value: customers
+        ports: [ { port: 5432 } ]
+
+    # --- Apps (pulling :latest from ACR) ---
+    - name: product-service
+      properties:
+        image: ${ACR_LOGIN_SERVER}/product_service:latest
+        resources: { requests: { cpu: 0.5, memoryInGb: 1.0 } }
+        environmentVariables:
+          - name: POSTGRES_HOST ; value: localhost
+          - name: POSTGRES_PORT ; value: "5432"
+          - name: POSTGRES_DB   ; value: products
+          - name: POSTGRES_USER ; value: postgres
+          - name: POSTGRES_PASSWORD ; value: postgres
+        ports: [ { port: 8000 } ]
+
+    - name: order-service
+      properties:
+        image: ${ACR_LOGIN_SERVER}/order_service:latest
+        resources: { requests: { cpu: 0.5, memoryInGb: 1.0 } }
+        environmentVariables:
+          - name: POSTGRES_HOST ; value: localhost
+          - name: POSTGRES_PORT ; value: "5432"
+          - name: POSTGRES_DB   ; value: orders
+          - name: POSTGRES_USER ; value: postgres
+          - name: POSTGRES_PASSWORD ; value: postgres
+          - name: CUSTOMER_SERVICE_URL ; value: http://localhost:8002
+        ports: [ { port: 8001 } ]
+
+    - name: customer-service
+      properties:
+        image: ${ACR_LOGIN_SERVER}/customer_service:latest
+        resources: { requests: { cpu: 0.5, memoryInGb: 1.0 } }
+        environmentVariables:
+          - name: POSTGRES_HOST ; value: localhost
+          - name: POSTGRES_PORT ; value: "5432"
+          - name: POSTGRES_DB   ; value: customers
+          - name: POSTGRES_USER ; value: postgres
+          - name: POSTGRES_PASSWORD ; value: postgres
+        ports: [ { port: 8002 } ]
+
+  osType: Linux
+  ipAddress:
+    type: Public
+    dnsNameLabel: sit722-staging-${RUN_ID}
+    ports:
+      - protocol: tcp
+        port: 8000
+      - protocol: tcp
+        port: 8001
+      - protocol: tcp
+        port: 8002
+restartPolicy: Never
+type: Microsoft.ContainerInstance/containerGroups
